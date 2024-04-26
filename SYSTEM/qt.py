@@ -1,20 +1,46 @@
 import os
 import shutil
+import subprocess
+
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTreeView,
     QAction, QMenu, QInputDialog, QMessageBox, QFileSystemModel
 )
-from PyQt5.QtCore import Qt, QSortFilterProxyModel, QDir
+from PyQt5.QtCore import Qt, QSortFilterProxyModel, QDir, QFileInfo
+
+
+def create_folders(folders):
+    for folder_name in folders:
+        executable_path = os.path.dirname(os.path.abspath(__file__))
+        parent_path = os.path.dirname(executable_path)
+        folder_path = os.path.join(parent_path, folder_name)
+        if not os.path.exists(folder_path):
+            os.makedirs(folder_path)
+
+
+def open_system_settings():
+    subprocess.Popen(['gnome-control-center'])
+
+
+def open_resource_monitor():
+    subprocess.Popen(['gnome-system-monitor'])
+
+
+def open_terminal():
+    subprocess.Popen(['gnome-terminal'])
+
 
 class SuperApp(QMainWindow):
     def __init__(self):
         super().__init__()
 
         self.setWindowTitle("Суперапп")
-        self.create_folders(["Корзина"])
+        self.resize(1920, 1080)
+        create_folders(["Корзина"])
         self.current_path = os.path.dirname(os.getcwd())
         self.trash_path = os.path.join(os.path.dirname(os.getcwd()), "Корзина")
         self.deleted_folders = {}
+        self.copied_folder_path = None
 
         self.load_deleted_folders()
 
@@ -35,7 +61,7 @@ class SuperApp(QMainWindow):
         self.model = CustomFileSystemModel(self)
         self.model.setRootPath("/")
         self.model.setFilter(QDir.NoDotAndDotDot | QDir.AllDirs)
-        
+
         self.proxy_model = QSortFilterProxyModel()
         self.proxy_model.setSourceModel(self.model)
 
@@ -55,13 +81,9 @@ class SuperApp(QMainWindow):
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.show_popup)
 
-    def create_folders(self, folders):    
-        for folder_name in folders:
-            executable_path = os.path.dirname(os.path.abspath(__file__))
-            parent_path = os.path.dirname(executable_path)
-            folder_path = os.path.join(parent_path, folder_name)
-            if not os.path.exists(folder_path):
-                os.makedirs(folder_path)
+        self.menu_bar.addAction("Открыть терминал", open_terminal)
+        self.menu_bar.addAction("Настройки системы", open_system_settings)
+        self.menu_bar.addAction("Монитор ресурсов", open_resource_monitor)
 
     def load_deleted_folders(self):
         if os.path.exists('deleted_folders.txt'):
@@ -80,11 +102,11 @@ class SuperApp(QMainWindow):
         event.accept()
 
     def display_folders(self, path):
-        current_column_hidden = self.tree.isColumnHidden(1) 
-        
+        current_column_hidden = self.tree.isColumnHidden(1)
+
         self.model.setRootPath(path)
         self.tree.setRootIndex(self.proxy_model.mapFromSource(self.model.index(path)))
-        
+
         self.tree.setColumnHidden(1, current_column_hidden)  # Восстанавливаем состояние столбца 'Тип'
 
     def go_back(self):
@@ -94,14 +116,19 @@ class SuperApp(QMainWindow):
             self.display_folders(parent_path)
 
     def create_folder(self):
-        folder_name, ok = QInputDialog.getText(self, "Создать папку", "Введите название папки:")
-        if ok and folder_name:
-            folder_path = os.path.join(self.current_path, folder_name)
-            os.mkdir(folder_path)
-            self.display_folders(self.current_path)
+        if os.path.basename(self.current_path) != "SYSTEM":
+            folder_name, ok = QInputDialog.getText(self, "Создать папку", "Введите название папки:")
+            if ok and folder_name:
+                folder_path = os.path.join(self.current_path, folder_name)
+                os.mkdir(folder_path)
+                self.display_folders(self.current_path)
+        else:
+            QMessageBox.warning(self, "Предупреждение", "Внутри папки SYSTEM нельзя создавать папки.")
 
     def delete_folder(self, folder_name):
-        confirm = QMessageBox.question(self, "Подтверждение", f"Вы уверены, что хотите переместить папку '{folder_name}' в корзину?", QMessageBox.Yes | QMessageBox.No)
+        confirm = QMessageBox.question(self, "Подтверждение",
+                                       f"Вы уверены, что хотите переместить папку '{folder_name}' в корзину?",
+                                       QMessageBox.Yes | QMessageBox.No)
         if confirm == QMessageBox.Yes:
             folder_path = os.path.join(self.current_path, folder_name)
             shutil.move(folder_path, self.trash_path)
@@ -109,7 +136,8 @@ class SuperApp(QMainWindow):
             self.display_folders(self.current_path)
 
     def delete_forever(self, folder_name):
-        confirm = QMessageBox.question(self, "Подтверждение", f"Вы уверены, что хотите навсегда удалить файл?", QMessageBox.Yes | QMessageBox.No)
+        confirm = QMessageBox.question(self, "Подтверждение", f"Вы уверены, что хотите навсегда удалить файл?",
+                                       QMessageBox.Yes | QMessageBox.No)
         if confirm == QMessageBox.Yes:
             folder_path = os.path.join(self.current_path, folder_name)
             shutil.rmtree(folder_path)
@@ -125,7 +153,8 @@ class SuperApp(QMainWindow):
             self.display_folders(self.current_path)
 
     def clear_recycle_bin(self):
-        confirm = QMessageBox.question(self, "Подтверждение", "Вы уверены, что хотите очистить корзину?", QMessageBox.Yes | QMessageBox.No)
+        confirm = QMessageBox.question(self, "Подтверждение", "Вы уверены, что хотите очистить корзину?",
+                                       QMessageBox.Yes | QMessageBox.No)
         if confirm == QMessageBox.Yes:
             for item in os.listdir(self.trash_path):
                 item_path = os.path.join(self.trash_path, item)
@@ -136,9 +165,9 @@ class SuperApp(QMainWindow):
             self.deleted_folders.clear()
             self.display_folders(self.current_path)
 
-
     def rename_folder(self, folder_name):
-        new_name, ok = QInputDialog.getText(self, "Переименовать папку", f"Введите новое имя для папки '{folder_name}':")
+        new_name, ok = QInputDialog.getText(self, "Переименовать папку",
+                                            f"Введите новое имя для папки '{folder_name}':")
         if ok and new_name:
             old_path = os.path.join(self.current_path, folder_name)
             new_path = os.path.join(self.current_path, new_name)
@@ -160,33 +189,72 @@ class SuperApp(QMainWindow):
             elif folder_name in self.deleted_folders:
                 menu = QMenu(self)
                 menu.addAction("Восстановить", lambda: self.restore_folder(folder_name))
+                menu.addAction("Удалить навсегда", lambda: self.delete_forever(folder_name))
                 menu.exec_(self.mapToGlobal(position))
             else:
                 menu = QMenu(self)
-                menu.addAction("Удалить", lambda: self.delete_folder(folder_name))
+                menu.addAction("Открыть", lambda: self.open_folder(index))
                 menu.addAction("Переименовать", lambda: self.rename_folder(folder_name))
+                menu.addAction("Копировать", lambda: self.copy_folder(folder_name))
+                menu.addAction("Удалить", lambda: self.delete_folder(folder_name))
                 menu.addAction("Удалить навсегда", lambda: self.delete_forever(folder_name))
+                menu.addAction("Свойства", lambda: self.show_properties(folder_name))
                 menu.exec_(self.mapToGlobal(position))
         else:
             menu = QMenu(self)
             menu.addAction("Создать папку", self.create_folder)
+            menu.addAction("Вставить", self.paste_folder)
             menu.exec_(self.mapToGlobal(position))
 
     def open_folder(self, index):
-        if index.row() == 0:
-            self.tree.setExpanded(index, False)
         folder_name = self.proxy_model.data(index, Qt.DisplayRole)
         folder_path = os.path.join(self.current_path, folder_name)
         self.current_path = folder_path
         self.display_folders(folder_path)
 
     def about(self):
-        QMessageBox.information(self, "О программе", 
-                                "Операционные системы и оболочки: Windows, Linux\n"
+        QMessageBox.information(self, "О программе",
+                                "Операционные системы и оболочки: Linux, Ubuntu\n"
                                 "Язык программирования: Python\n"
-                                "ФИО: Иванов Иван Иванович\n"
-                                "Группа разработчика: Группа 1")
-        
+                                "ФИО: Киргизов  Андрей Геннадьевич\n"
+                                "Группа разработчика: При-23")
+
+    def show_properties(self, folder_name):
+        folder_path = os.path.join(self.current_path, folder_name)
+        folder_info = QFileInfo(folder_path)
+        properties = {
+            "Название": folder_name,
+            "Тип": "Папка" if folder_info.isDir() else "Файл",
+            "Содержимое": self.get_content_info(folder_path),
+            "Путь": folder_path,
+            "Дата изменения": folder_info.lastModified().toString(Qt.ISODate),
+            "Дата создания": folder_info.created().toString(Qt.ISODate)
+        }
+        properties_text = "\n".join([f"{key}: {value}" for key, value in properties.items()])
+        QMessageBox.information(self, "Свойства папки", properties_text)
+
+    def get_content_info(self, folder_path):
+        content = os.listdir(folder_path)
+        num_files = sum(os.path.isfile(os.path.join(folder_path, item)) for item in content)
+        total_size = sum(os.path.getsize(os.path.join(folder_path, item)) for item in content if
+                         os.path.isfile(os.path.join(folder_path, item)))
+        return f"Файлов: {num_files}, Размер: {total_size} байт"
+
+    def copy_folder(self, folder_name):
+        folder_path = os.path.join(self.current_path, folder_name)
+        self.copied_folder_path = folder_path
+        QMessageBox.information(self, "Папка скопирована", f"Папка '{folder_name}' скопирована и готова к вставке.")
+
+    def paste_folder(self):
+        if self.copied_folder_path:
+            destination_path = self.current_path
+            try:
+                shutil.copytree(self.copied_folder_path,
+                                os.path.join(destination_path, os.path.basename(self.copied_folder_path)))
+                QMessageBox.information(self, "Папка вставлена", "Папка успешно вставлена.")
+            except Exception as e:
+                QMessageBox.warning(self, "Ошибка вставки", f"Не удалось вставить папку: {str(e)}")
+
 
 class CustomFileSystemModel(QFileSystemModel):
     def data(self, index, role=Qt.DisplayRole):
@@ -195,6 +263,7 @@ class CustomFileSystemModel(QFileSystemModel):
             if path and os.path.isdir(path):
                 return str(len(os.listdir(path)))
         return super().data(index, role)
+
 
 if __name__ == "__main__":
     app = QApplication([])

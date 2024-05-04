@@ -2,11 +2,12 @@ import os
 import shutil
 import subprocess
 
+from PyQt5.QtGui import QDrag
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTreeView,
-    QAction, QMenu, QInputDialog, QMessageBox, QFileSystemModel
+    QAction, QMenu, QInputDialog, QMessageBox, QFileSystemModel, QVBoxLayout, QWidget, QAbstractItemView
 )
-from PyQt5.QtCore import Qt, QSortFilterProxyModel, QDir, QFileInfo
+from PyQt5.QtCore import Qt, QSortFilterProxyModel, QDir, QFileInfo, QMimeData, QUrl
 
 
 def create_folders(folders):
@@ -85,6 +86,92 @@ class SuperApp(QMainWindow):
         self.menu_bar.addAction("Настройки системы", open_system_settings)
         self.menu_bar.addAction("Монитор ресурсов", open_resource_monitor)
 
+        self.tree.setSelectionMode(self.tree.SingleSelection)
+        self.tree.setDragDropMode(QAbstractItemView.InternalMove)
+        self.tree.setDragEnabled(True)
+        self.tree.setAcceptDrops(True)
+        self.tree.setDropIndicatorShown(True)
+        self.model.setReadOnly(False)
+
+        self.setAcceptDrops(True)
+
+        layout = QVBoxLayout()
+
+        # Добавляем дерево в макет
+        layout.addWidget(self.tree)
+
+        # Создаем главный виджет, который будет содержать наши виджеты
+        central_widget = QWidget()
+        central_widget.setLayout(layout)
+
+        # Устанавливаем главный виджет в качестве центрального виджета окна
+        self.setCentralWidget(central_widget)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        event.acceptProposedAction()
+
+    def startDrag(self, event):
+        drag = QDrag(self)
+        mime_data = QMimeData()
+        urls = [QUrl.fromLocalFile(file_path) for file_path in self.selected_files]
+        mime_data.setUrls(urls)
+        drag.setMimeData(mime_data)
+
+        drop_action = drag.exec_(Qt.CopyAction | Qt.MoveAction)
+
+    def mousePressEvent(self, event):
+        index = self.tree.indexAt(event.pos())
+        if not index.isValid():
+            return
+
+        if event.button() == Qt.LeftButton:
+            self.selected_files = []
+            self.selected_files.append(self.proxy_model.data(index, Qt.DisplayRole))
+            self.startDrag(event)
+
+    def dropEvent(self, event):
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            for url in urls:
+                path = url.toLocalFile()
+                if os.path.isdir(path):
+                    destination_path = self.current_path
+                    try:
+                        shutil.move(path, destination_path)
+                    except Exception as e:
+                        QMessageBox.warning(self, "Ошибка перемещения", f"Не удалось переместить папку: {str(e)}")
+                    self.display_folders(self.current_path)
+            event.accept()
+        else:
+            event.ignore()
+
+    def keyPressEvent(self, event):
+        modifiers = QApplication.keyboardModifiers()
+        if event.key() == Qt.Key_C and modifiers == Qt.ControlModifier:
+            index = self.tree.currentIndex()
+            folder_name = self.proxy_model.data(index, Qt.DisplayRole)
+            self.copy_folder(folder_name)
+        elif event.key() == Qt.Key_V and modifiers == Qt.ControlModifier:
+            self.paste_folder()
+        elif event.key() == Qt.Key_Backspace:
+            self.go_back()
+        elif event.key() == Qt.Key_F1:
+            self.about()
+        elif event.key() == Qt.Key_O and modifiers == Qt.ControlModifier:
+            self.create_folder()
+        elif event.key() == Qt.Key_Delete:
+            index = self.tree.currentIndex()
+            folder_name = self.proxy_model.data(index, Qt.DisplayRole)
+            self.delete_folder(folder_name)
+
+        super().keyPressEvent(event)
+
     def load_deleted_folders(self):
         if os.path.exists('deleted_folders.txt'):
             with open('deleted_folders.txt', 'r') as f:
@@ -126,6 +213,9 @@ class SuperApp(QMainWindow):
             QMessageBox.warning(self, "Предупреждение", "Внутри папки SYSTEM нельзя создавать папки.")
 
     def delete_folder(self, folder_name):
+        if folder_name == "SYSTEM" or folder_name == "Корзина":
+            QMessageBox.warning(self, "Недоступно к удалению", "Данная папка недоступна к удалению.")
+            return
         confirm = QMessageBox.question(self, "Подтверждение",
                                        f"Вы уверены, что хотите переместить папку '{folder_name}' в корзину?",
                                        QMessageBox.Yes | QMessageBox.No)
@@ -140,6 +230,8 @@ class SuperApp(QMainWindow):
                                        QMessageBox.Yes | QMessageBox.No)
         if confirm == QMessageBox.Yes:
             folder_path = os.path.join(self.current_path, folder_name)
+            if folder_name in self.deleted_folders.keys():
+                del self.deleted_folders[folder_name]
             shutil.rmtree(folder_path)
             self.display_folders(self.current_path)
 
@@ -206,18 +298,30 @@ class SuperApp(QMainWindow):
             menu.addAction("Вставить", self.paste_folder)
             menu.exec_(self.mapToGlobal(position))
 
-    def open_folder(self, index):
+    def open_folder(self, index=None):
+        if index is None:
+            index = self.tree.currentIndex()
         folder_name = self.proxy_model.data(index, Qt.DisplayRole)
         folder_path = os.path.join(self.current_path, folder_name)
         self.current_path = folder_path
         self.display_folders(folder_path)
 
     def about(self):
+        hotkeys_info = (
+            "Горячие клавиши:\n"
+            "Ctrl+C - Копировать\n"
+            "Ctrl+V - Вставить\n"
+            "Delete - Перенести в корзину\n"
+            "Backspace - Назад\n"
+            "F1 - Открыть справку\n"
+            "Ctrl+O - Создать папку в текущей директории\n"
+        )
         QMessageBox.information(self, "О программе",
                                 "Операционные системы и оболочки: Linux, Ubuntu\n"
                                 "Язык программирования: Python\n"
                                 "ФИО: Киргизов  Андрей Геннадьевич\n"
-                                "Группа разработчика: При-23")
+                                "Группа разработчика: При-23\n\n"
+                                + hotkeys_info)
 
     def show_properties(self, folder_name):
         folder_path = os.path.join(self.current_path, folder_name)
@@ -270,3 +374,4 @@ if __name__ == "__main__":
     window = SuperApp()
     window.show()
     app.exec_()
+

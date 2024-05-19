@@ -1,13 +1,21 @@
+import mmap
 import os
 import shutil
 import subprocess
+import sys
+import datetime
+
+import posix_ipc
+import psutil
+import pyudev
 
 from PyQt5.QtGui import QDrag
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTreeView,
-    QAction, QMenu, QInputDialog, QMessageBox, QFileSystemModel, QVBoxLayout, QWidget, QAbstractItemView
+    QAction, QMenu, QInputDialog, QMessageBox, QFileSystemModel, QVBoxLayout, QWidget, QAbstractItemView, QPushButton,
+    QFileDialog, QLineEdit, QDialog, QListWidget, QListWidgetItem, QDockWidget, QSizePolicy
 )
-from PyQt5.QtCore import Qt, QSortFilterProxyModel, QDir, QFileInfo, QMimeData, QUrl
+from PyQt5.QtCore import Qt, QSortFilterProxyModel, QDir, QFileInfo, QMimeData, QUrl, QTimer
 
 
 def create_folders(folders):
@@ -35,6 +43,17 @@ class SuperApp(QMainWindow):
     def __init__(self):
         super().__init__()
 
+        self.actions = []
+
+        self.module_shared_memory = posix_ipc.SharedMemory("/module_memory", posix_ipc.O_CREAT, size=256)
+        self.module_mapped_memory = mmap.mmap(self.module_shared_memory.fd, self.module_shared_memory.size)
+
+        self.memory_shared_memory = posix_ipc.SharedMemory("/memory", posix_ipc.O_CREAT, size=256)
+        self.memory_mapped_memory = mmap.mmap(self.memory_shared_memory.fd, self.memory_shared_memory.size)
+
+        self.process_shared_memory = posix_ipc.SharedMemory("/process_memory", posix_ipc.O_CREAT, size=256)
+        self.process_mapped_memory = mmap.mmap(self.process_shared_memory.fd, self.process_shared_memory.size)
+
         self.setWindowTitle("Суперапп")
         self.resize(1920, 1080)
         create_folders(["Корзина"])
@@ -52,6 +71,31 @@ class SuperApp(QMainWindow):
         self.about_action.triggered.connect(self.about)
         self.help_menu.addAction(self.about_action)
 
+        self.task_menu = self.menu_bar.addMenu("Межпроцессорные взаимодействия")
+        self.memory_action = QAction("Виртуальная память", self)
+        self.memory_action.triggered.connect(self.show_memory_window)
+        self.task_menu.addAction(self.memory_action)
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_memory)
+        self.timer.start(1000)
+
+        self.module_action = QAction("Модули процессора", self)
+        self.module_action.triggered.connect(self.show_module_window)
+        self.task_menu.addAction(self.module_action)
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_module)
+        self.timer.start(1000)
+
+        self.process_action = QAction("Пользовательские процессы", self)
+        self.process_action.triggered.connect(self.show_process_window)
+        self.task_menu.addAction(self.process_action)
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_process)
+        self.timer.start(1000)
+
         # Кнопка "Назад"
         self.back_action = QAction("Назад", self)
         self.back_action.triggered.connect(self.go_back)
@@ -66,7 +110,7 @@ class SuperApp(QMainWindow):
         self.proxy_model = QSortFilterProxyModel()
         self.proxy_model.setSourceModel(self.model)
 
-        self.tree = QTreeView(self)
+        self.tree = TreeView()
         self.tree.setModel(self.proxy_model)
         self.tree.setRootIndex(self.proxy_model.mapFromSource(self.model.index(self.current_path)))
         self.tree.setColumnWidth(0, 200)
@@ -95,17 +139,177 @@ class SuperApp(QMainWindow):
 
         self.setAcceptDrops(True)
 
+        self.save_report_button = QPushButton("Сохранить отчет пользовательских программ", self)
+        self.save_report_button.clicked.connect(self.save_report)
+        self.statusBar().addPermanentWidget(self.save_report_button)
+
+        self.open_custom_terminal_button = QPushButton("Открыть свой терминал", self)
+        self.open_custom_terminal_button.clicked.connect(self.open_custom_terminal)
+        self.statusBar().addPermanentWidget(self.open_custom_terminal_button)
+
+        self.save_actions_buttons = QPushButton("Cохранить действия приложения", self)
+        self.save_actions_buttons.clicked.connect(self.save_actions)
+        self.statusBar().addPermanentWidget(self.save_actions_buttons)
+
+        self.search_input = QLineEdit(self)
+        self.search_input.returnPressed.connect(self.search)
+        self.toolbar.addWidget(self.search_input)
+
+        # Кнопка поиска
+        self.search_button = QPushButton("Поиск", self)
+        self.search_button.clicked.connect(self.search)
+        self.toolbar.addWidget(self.search_button)
+
+        self.search_results_list = QListWidget(self)
+        self.search_results_list.itemDoubleClicked.connect(self.open_searched_item)
+        self.search_results_list.hide()
+
+        self.search_results_dock = QDockWidget("Результаты поиска", self)
+        self.search_results_dock.setWidget(self.search_results_list)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.search_results_dock)
+        self.search_results_dock.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self.search_results_dock.hide()
+
         layout = QVBoxLayout()
 
-        # Добавляем дерево в макет
         layout.addWidget(self.tree)
 
-        # Создаем главный виджет, который будет содержать наши виджеты
         central_widget = QWidget()
         central_widget.setLayout(layout)
 
         # Устанавливаем главный виджет в качестве центрального виджета окна
         self.setCentralWidget(central_widget)
+
+        self.udev_context = pyudev.Context()
+        self.monitor = pyudev.Monitor.from_netlink(self.udev_context)
+        self.monitor.filter_by(subsystem='block')
+        self.observer = pyudev.MonitorObserver(self.monitor, self.handle_device_event)
+        self.observer.start()
+
+    def save_actions(self):
+        file_path, _ = QFileDialog.getSaveFileName(self, "Сохранить отчет", "", "Текстовый файл (*.log)")
+        if file_path:
+            self.generate_actions(file_path)
+
+    def generate_actions(self, file_path):
+        with open(f"{file_path}", "w") as f:
+            for action in self.actions:
+                f.write(action + "\n")
+
+    def open_custom_terminal(self):
+        subprocess.Popen(["python3", "terminal.py"])
+        self.actions.append(f"Открыт свой терминал - {datetime.datetime.now()}")
+        print(self.actions)
+
+    def handle_device_event(self, action, device):
+        if action == 'add':
+            device_path = device.device_node
+            device_name = device.get('ID_FS_LABEL', os.path.basename(device_path))
+            app_directory = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if "sdb" not in device_name:
+                device_directory = os.path.join(app_directory, device_name)
+                os.makedirs(device_directory, exist_ok=True)
+                QMessageBox.information(self, 'Подключено устройство', f"Устройство: {device_name} ({device_path})")
+                self.actions.append(f"Добавлено устройство: {device_name} - {datetime.datetime.now()}")
+                self.display_folders(device_directory)
+
+        elif action == 'remove':
+            device_path = device.device_node
+            device_name = device.get('ID_FS_LABEL', os.path.basename(device_path))
+            app_directory = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if "sdb" not in device_name:
+                device_directory = os.path.join(app_directory, device_name)
+                shutil.rmtree(device_directory)
+                self.actions.append(f"Удалено устройство: {device_name} - {datetime.datetime.now()}")
+
+    def update_memory(self):
+        memory_percent = psutil.virtual_memory().percent
+        self.memory_mapped_memory.seek(0)
+        self.memory_mapped_memory.write(str(memory_percent).encode('utf-8'))
+        self.memory_mapped_memory.flush()
+
+    def update_module(self):
+        module_count = len(sys.modules)
+        self.module_mapped_memory.seek(0)
+        self.module_mapped_memory.write(str(module_count).encode('utf-8'))
+        self.module_mapped_memory.flush()
+
+    def update_process(self):
+        process_count = sum(1 for _ in psutil.process_iter())
+        self.process_mapped_memory.seek(0)
+        self.process_mapped_memory.write(str(process_count).encode('utf-8'))
+        self.process_mapped_memory.flush()
+
+    def show_memory_window(self):
+        self.actions.append(f"Открыто окно памяти компьютера - {datetime.datetime.now()}")
+        subprocess.Popen([sys.executable, "memory_window.py"])
+
+    def show_process_window(self):
+        self.actions.append(f"Открыты пользовательские процессы - {datetime.datetime.now()}")
+        subprocess.Popen([sys.executable, "process_window.py"])
+
+    def show_module_window(self):
+        self.actions.append(f"Открыты модули процессора - {datetime.datetime.now()}")
+        subprocess.Popen([sys.executable, "module_window.py"])
+
+    def __del__(self):
+        self.memory_mapped_memory.close()
+        self.memory_shared_memory.close_fd()
+
+        self.process_mapped_memory.close()
+        self.process_shared_memory.close_fd()
+
+        self.module_mapped_memory.close()
+        self.module_shared_memory.close_fd()
+
+    def search(self):
+        query = self.search_input.text()
+        if query:
+            results = self.find_files_and_folders(query)
+            self.display_search_results(results)
+            self.actions.append(f"Произведен поиск файла {query} - {datetime.datetime.now()}")
+
+    def find_files_and_folders(self, query):
+        import os
+        results = []
+        for root, dirs, files in os.walk(self.current_path):
+            for name in files + dirs:
+                if query.lower() in name.lower():
+                    results.append(os.path.join(root, name))
+        return results
+
+    def display_search_results(self, results):
+        self.search_results_list.clear()
+        if results:
+            self.search_results_dock.show()
+            for result in results:
+                item = QListWidgetItem(result)
+                self.search_results_list.addItem(item)
+        else:
+            self.search_results_dock.hide()
+
+    def open_searched_item(self, item):
+        file_path = item.text()
+        if os.path.isdir(file_path):
+            self.current_path = file_path
+            self.display_folders(file_path)
+
+    def save_report(self):
+        self.actions.append(f"Сохранен отчет пользовательских процессов - {datetime.datetime.now()}")
+        file_path, _ = QFileDialog.getSaveFileName(self, "Сохранить отчет", "", "Текстовый файл (*.txt)")
+        if file_path:
+            self.generate_report(file_path)
+
+    def generate_report(self, file_path):
+        with open(file_path, 'w') as file:
+            file.write("Отчет о запущенных процессах во время работы 'Суперапп':\n\n")
+            for process in self.get_running_processes():
+                file.write(f"Имя процесса: {process.name()}, Время старта: {process.create_time()}\n")
+
+    def get_running_processes(self):
+        current_process = psutil.Process()
+        children = current_process.children(recursive=True)
+        return children + [current_process]
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -189,6 +393,7 @@ class SuperApp(QMainWindow):
         event.accept()
 
     def display_folders(self, path):
+        self.actions.append(f"Открыта дериктория {path} - {datetime.datetime.now()}")
         current_column_hidden = self.tree.isColumnHidden(1)
 
         self.model.setRootPath(path)
@@ -206,6 +411,7 @@ class SuperApp(QMainWindow):
         if os.path.basename(self.current_path) != "SYSTEM":
             folder_name, ok = QInputDialog.getText(self, "Создать папку", "Введите название папки:")
             if ok and folder_name:
+                self.actions.append(f"Cоздана папка {folder_name} - {datetime.datetime.now()}")
                 folder_path = os.path.join(self.current_path, folder_name)
                 os.mkdir(folder_path)
                 self.display_folders(self.current_path)
@@ -224,6 +430,7 @@ class SuperApp(QMainWindow):
             shutil.move(folder_path, self.trash_path)
             self.deleted_folders[folder_name] = os.path.dirname(folder_path)
             self.display_folders(self.current_path)
+            self.actions.append(f"Удален файл {folder_name} - {datetime.datetime.now()}")
 
     def delete_forever(self, folder_name):
         confirm = QMessageBox.question(self, "Подтверждение", f"Вы уверены, что хотите навсегда удалить файл?",
@@ -234,6 +441,7 @@ class SuperApp(QMainWindow):
                 del self.deleted_folders[folder_name]
             shutil.rmtree(folder_path)
             self.display_folders(self.current_path)
+            self.actions.append(f"Навсегда удален файл {folder_name} - {datetime.datetime.now()}")
 
     def restore_folder(self, folder_name):
         original_path = self.deleted_folders.get(folder_name)
@@ -243,6 +451,7 @@ class SuperApp(QMainWindow):
             shutil.move(folder_path, new_path)
             del self.deleted_folders[folder_name]
             self.display_folders(self.current_path)
+            self.actions.append(f"Восстановлен файл {folder_name} - {datetime.datetime.now()}")
 
     def clear_recycle_bin(self):
         confirm = QMessageBox.question(self, "Подтверждение", "Вы уверены, что хотите очистить корзину?",
@@ -256,6 +465,7 @@ class SuperApp(QMainWindow):
                     shutil.rmtree(item_path)
             self.deleted_folders.clear()
             self.display_folders(self.current_path)
+            self.actions.append(f"Очищена корзина - {datetime.datetime.now()}")
 
     def rename_folder(self, folder_name):
         new_name, ok = QInputDialog.getText(self, "Переименовать папку",
@@ -265,6 +475,7 @@ class SuperApp(QMainWindow):
             new_path = os.path.join(self.current_path, new_name)
             os.rename(old_path, new_path)
             self.display_folders(self.current_path)
+            self.actions.append(f"Папка {folder_name} переименована в {new_name} - {datetime.datetime.now()}")
 
     def show_popup(self, position):
         index = self.tree.indexAt(position)
@@ -303,6 +514,11 @@ class SuperApp(QMainWindow):
             index = self.tree.currentIndex()
         folder_name = self.proxy_model.data(index, Qt.DisplayRole)
         folder_path = os.path.join(self.current_path, folder_name)
+        if folder_name == "Корзина":
+            for f in os.scandir(folder_path):
+                if f.name not in self.deleted_folders.keys():
+                    self.deleted_folders[f.name] = os.path.dirname(os.getcwd())
+                    print(f.name)
         self.current_path = folder_path
         self.display_folders(folder_path)
 
@@ -335,6 +551,7 @@ class SuperApp(QMainWindow):
             "Дата создания": folder_info.created().toString(Qt.ISODate)
         }
         properties_text = "\n".join([f"{key}: {value}" for key, value in properties.items()])
+        self.actions.append(f"Открыты свойства папки {folder_name} - {datetime.datetime.now()}")
         QMessageBox.information(self, "Свойства папки", properties_text)
 
     def get_content_info(self, folder_path):
@@ -347,6 +564,7 @@ class SuperApp(QMainWindow):
     def copy_folder(self, folder_name):
         folder_path = os.path.join(self.current_path, folder_name)
         self.copied_folder_path = folder_path
+        self.actions.append(f"Папка {folder_name} cкопирована - {datetime.datetime.now()}")
         QMessageBox.information(self, "Папка скопирована", f"Папка '{folder_name}' скопирована и готова к вставке.")
 
     def paste_folder(self):
@@ -355,6 +573,7 @@ class SuperApp(QMainWindow):
             try:
                 shutil.copytree(self.copied_folder_path,
                                 os.path.join(destination_path, os.path.basename(self.copied_folder_path)))
+                self.actions.append(f"Папка {self.copied_folder_path} вставлена - {datetime.datetime.now()}")
                 QMessageBox.information(self, "Папка вставлена", "Папка успешно вставлена.")
             except Exception as e:
                 QMessageBox.warning(self, "Ошибка вставки", f"Не удалось вставить папку: {str(e)}")
@@ -369,9 +588,36 @@ class CustomFileSystemModel(QFileSystemModel):
         return super().data(index, role)
 
 
+class TreeView(QTreeView):
+    def __init__(self):
+        super().__init__()
+        self.dragged_item = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            index = self.indexAt(event.pos())
+            if index.isValid():
+                source_index = self.model().mapToSource(index)
+                self.dragged_item = self.model().sourceModel().filePath(source_index)
+                last_folder_name = os.path.basename(self.dragged_item)
+                if last_folder_name.lower() == "корзина" or last_folder_name.lower() == "system":
+                    self.dragged_item = None
+                else:
+                    print(f"File being dragged: {self.dragged_item}")
+        super().mousePressEvent(event)
+
+    def startDrag(self, supportedActions):
+        if self.dragged_item:
+            drag = QDrag(self)
+            mime_data = QMimeData()
+            urls = [QUrl.fromLocalFile(self.dragged_item)]
+            mime_data.setUrls(urls)
+            drag.setMimeData(mime_data)
+            drag.exec_(Qt.CopyAction | Qt.MoveAction)
+
+
 if __name__ == "__main__":
     app = QApplication([])
     window = SuperApp()
     window.show()
     app.exec_()
-
